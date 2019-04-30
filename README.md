@@ -2,9 +2,11 @@
 
 [![Build Status](https://travis-ci.org/ankhers/mongodb.svg?branch=master)](https://travis-ci.org/ankhers/mongodb)
 
+[Documentation for Mongodb is available online](http://hexdocs.pm/mongodb/).
+
 ## Features
 
-  * Supports MongoDB versions 3.2, 3.4, 3.6
+  * Supports MongoDB versions 3.2, 3.4, 3.6, 4.0
   * Connection pooling (through db_connection)
   * Streaming cursors
   * Performant ObjectID generation
@@ -98,7 +100,13 @@ def start(_type, _args) do
 end
 ```
 
-Then you can use the pool as following:
+DBConnection.Poolboy defaults to [10 Poolboy connections](https://hexdocs.pm/db_connection/1.1.3/DBConnection.Poolboy.html#content), but you can change that with the `:pool_size` option:
+```elixir
+{:ok, conn} = Mongo.start_link(name: :mongo, database: "test", pool: DBConnection.Poolboy, pool_size: 2)
+```
+
+
+Remember to specify the pool in each query. There is [some discussion](https://github.com/ankhers/mongodb/issues/175) on how to change this requirement.
 
 ```elixir
 Mongo.find(:mongo, "collection", %{}, limit: 20, pool: DBConnection.Poolboy)
@@ -113,6 +121,30 @@ To connect to a Mongo cluster that is using replica sets, it is recommended to u
 ```
 
 This will allow for scenarios where the first `"hostname1.net:27017"` is unreachable for any reason and will automatically try to connect to each of the following entries in the list to connect to the cluster.
+
+### Auth mechanisms
+
+For versions of Mongo 3.0 and greater, the auth mechanism defaults to SCRAM. If you'd like to use [MONGODB-X509](https://docs.mongodb.com/manual/tutorial/configure-x509-client-authentication/#authenticate-with-a-x-509-certificate)
+authentication, you can specify that as a `start_link` option.
+
+```elixir
+{:ok, pid} = Mongo.start_link(database: "test", auth_mechanism: :x509)
+```
+
+### AWS, TLS and Erlang SSL ciphers
+
+Some MongoDB cloud providers (notably AWS) require a particular TLS cipher that isn't enabled by default in the Erlang SSL module. In order to connect to these services,
+you'll want to add this cipher to your `ssl_opts`:
+
+```elixir
+{:ok, pid} = Mongo.start_link(database: "test",
+      ssl_opts: [
+        ciphers: ['AES256-GCM-SHA384'],
+        cacertfile: "...",
+        certfile: "...")
+      ]
+)
+```
 
 ### Examples
 

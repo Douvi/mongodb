@@ -28,6 +28,57 @@ defmodule Mongo.Test do
     end
   end
 
+  test "show_collections", c do
+
+    coll_1 = unique_name() <> "_1"
+    coll_2 = unique_name() <> "_2"
+
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 1})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 2})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_2, %{foo: 3})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_2, %{foo: 4})
+
+    cmd      = [createIndexes: coll_1, indexes: [[key: [foo: 1], name: "not-a-collection"]]]
+    assert {:ok, _} = Mongo.command(c.pid, cmd)
+
+    cmd      = [createIndexes: coll_2, indexes: [[key: [foo: 1, bar: 1], name: "not-a-collection"]]]
+    assert {:ok, _} = Mongo.command(c.pid, cmd)
+
+    colls = c.pid
+    |> Mongo.show_collections()
+    |> Enum.to_list()
+
+    assert Enum.member?(colls, coll_1)
+    assert Enum.member?(colls, coll_2)
+    assert not Enum.member?(colls, "not-a-collection")
+
+  end
+
+  test "list_indexes", c do
+
+    coll_1 = unique_name()
+
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 1})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 2})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 3})
+    assert {:ok, _} = Mongo.insert_one(c.pid, coll_1, %{foo: 4})
+
+    cmd = [createIndexes: coll_1, indexes: [[key: [foo: 1], name: "foo"]]]
+    assert {:ok, _} = Mongo.command(c.pid, cmd)
+
+    cmd = [createIndexes: coll_1, indexes: [[key: [foo: 1, bar: 1], name: "foo-bar"]]]
+    assert {:ok, _} = Mongo.command(c.pid, cmd)
+
+    indexes = c.pid
+    |> Mongo.list_index_names(coll_1)
+    |> Enum.to_list()
+
+    assert Enum.count(indexes) == 3
+    assert Enum.member?(indexes, "_id_")
+    assert Enum.member?(indexes, "foo")
+    assert Enum.member?(indexes, "foo-bar")
+  end
+
   test "aggregate", c do
     coll = unique_name()
 
@@ -207,6 +258,20 @@ defmodule Mongo.Test do
       %{"$set" => %{baz: 1}},
       [upsert: true, return_document: :after])
     assert %{"foo" => 43, "baz" => 1} = value, "Should upsert"
+
+    # don't find return {:ok, nil}
+    assert {:ok, nil} == Mongo.find_one_and_update(c.pid, coll,
+      %{"number" => 666},
+      %{"$set" => %{title: "the number of the beast"}})
+
+    assert {:ok, nil} == Mongo.find_one_and_update(c.pid, "coll_that_doesnt_exist",
+      %{"number" => 666},
+      %{"$set" => %{title: "the number of the beast"}})
+
+    # wrong parameter
+    assert {:error, %Mongo.Error{}} = Mongo.find_one_and_update(c.pid, 2,
+      %{"number" => 666},
+      %{"$set" => %{title: "the number of the beast"}})
   end
 
   test "find_one_and_replace", c do
@@ -500,6 +565,20 @@ defmodule Mongo.Test do
     assert %Mongo.Cursor{opts: [slave_ok: true, no_cursor_timeout: true,
                                 skip: 10], coll: "coll"} =
              Mongo.find(c.pid, "coll", %{}, skip: 10, cursor_timeout: false)
+  end
+
+  # issue #220
+  @tag :mongo_3_4
+  test "correctly query NumberDecimal", c do
+    coll = "number_decimal_test"
+    Mongo.command(c.pid,
+      %{
+        eval:
+          "db.#{coll}.insert({number: NumberDecimal('123.456')})"
+      }
+    )
+
+    assert %{"number" => %Decimal{coef: 123456, exp: -3}} = Mongo.find(c.pid, coll, %{}, limit: 1) |> Enum.to_list |> List.first()
   end
 
   test "access multiple databases", c do

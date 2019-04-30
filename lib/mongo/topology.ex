@@ -27,8 +27,12 @@ defmodule Mongo.Topology do
   end
 
   def wait_for_connection(pid, timeout, start_time) do
-    timeout = timeout - System.convert_time_unit(System.monotonic_time - start_time, :native, :milliseconds)
+    timeout = timeout - System.convert_time_unit(System.monotonic_time - start_time, :native, :millisecond)
 
+    wait_for_connection(pid, timeout)
+  end
+
+  defp wait_for_connection(pid, timeout) when timeout >= 0 do
     try do
       case GenServer.call(pid, :wait_for_connection, timeout) do
         {:new_connection, server} ->
@@ -40,6 +44,9 @@ defmodule Mongo.Topology do
       :exit, {:timeout, _} ->
         {:error, :selection_timeout}
     end
+  end
+  defp wait_for_connection(pid, _timeout) do
+    wait_for_connection(pid, 0)
   end
 
   def topology(pid) do
@@ -69,7 +76,7 @@ defmodule Mongo.Topology do
     cond do
       type == :single and length(seeds) > 1 ->
         {:stop, :single_topology_multiple_hosts}
-      set_name != nil and not type in [:unknown, :replica_set_no_primary, :single] ->
+      set_name != nil and not(type in [:unknown, :replica_set_no_primary, :single]) ->
         {:stop, :set_name_bad_topology}
       true ->
         servers = servers_from_seeds(seeds)
@@ -121,7 +128,7 @@ defmodule Mongo.Topology do
     {:reply, :ok, new_state}
   end
 
-  def handle_call(:wait_for_connection, from, %{connection_pools: pools} = state) when map_size(pools) > 0 do
+  def handle_call(:wait_for_connection, _from, %{connection_pools: pools} = state) when map_size(pools) > 0 do
     servers = Enum.map(pools, fn {key, _value} -> key end)
     {:reply, {:connected, servers}, state}
   end
@@ -143,27 +150,29 @@ defmodule Mongo.Topology do
   end
 
   def handle_cast({:connected, monitor_pid}, state) do
-    {host, ^monitor_pid} = Enum.find(state.monitors, fn {_key, value} -> value == monitor_pid end)
-    arbiters =
-      Enum.flat_map(state.topology.servers, fn {_, s} -> s.arbiters end)
-
-    new_state =
-      if host in arbiters do
+    monitor = Enum.find(state.monitors, fn {_key, value} -> value == monitor_pid end)
+    new_state = case monitor do
+      nil ->
         state
-      else
-        conn_opts =
-          state.opts
-          |> Keyword.put(:connection_type, :client)
-          |> Keyword.put(:topology_pid, self())
-          |> connect_opts_from_address(host)
+      {host, ^monitor_pid} ->
+        arbiters = fetch_arbiters(state)
+        if host in arbiters do
+          state
+        else
+          conn_opts =
+            state.opts
+            |> Keyword.put(:connection_type, :client)
+            |> Keyword.put(:topology_pid, self())
+            |> connect_opts_from_address(host)
 
-        {:ok, pool} = DBConnection.start_link(Mongo.Protocol, conn_opts)
-        connection_pools = Map.put(state.connection_pools, host, pool)
-        Enum.each(state.waiting_pids, fn from ->
-          GenServer.reply(from, {:new_connection, host})
-        end)
-        %{ state | connection_pools: connection_pools, waiting_pids: [] }
-      end
+          {:ok, pool} = DBConnection.start_link(Mongo.Protocol, conn_opts)
+          connection_pools = Map.put(state.connection_pools, host, pool)
+          Enum.each(state.waiting_pids, fn from ->
+            GenServer.reply(from, {:new_connection, host})
+          end)
+          %{ state | connection_pools: connection_pools, waiting_pids: [] }
+        end
+    end
     {:noreply, new_state}
   end
 
@@ -207,8 +216,11 @@ defmodule Mongo.Topology do
   end
 
   defp reconcile_servers(state) do
+    arbiters = fetch_arbiters(state)
     old_addrs = Map.keys(state.monitors)
-    new_addrs = Map.keys(state.topology.servers)
+    # remove arbiters from connection pool as descriptions are recieved
+    new_addrs = Map.keys(state.topology.servers) -- arbiters
+
     added = new_addrs -- old_addrs
     removed = old_addrs -- new_addrs
 
@@ -276,5 +288,9 @@ defmodule Mongo.Topology do
   defp rename_key(map, original_key, new_key) do
     value = Keyword.get(map, original_key)
     map |> Keyword.delete(original_key) |> Keyword.put(new_key, value)
+  end
+
+  defp fetch_arbiters(state) do
+    Enum.flat_map(state.topology.servers, fn {_, s} -> s.arbiters end)
   end
 end

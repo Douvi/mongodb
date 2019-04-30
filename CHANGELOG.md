@@ -1,3 +1,4 @@
+
 ## v0.5.0-dev
 
 * Breaking Changes
@@ -10,7 +11,27 @@
 * Enhancements
   * Support for MongoDB 3.6 collection [Change Streams](https://docs.mongodb.com/manual/changeStreams/)
 
-## v0.4.6 (2018-05-20)
+## v0.4.8-dev
+
+* Enhancements
+  * Added hostname and port to exceptions
+  * Added support for x509 authentication
+  * Allow passing only partial `read_preference` information
+  * Add support for GridFS
+
+* Bug Fixes
+  * Fixed a connection leak
+  * Properly parse write concern for URL
+  * Properly follow read preference for `secondary_preferred`
+
+## v0.4.7
+
+* Enhancements
+  * Added 4.0 to supported versions
+  * Initial support for mongodb+srv URLs
+  * Support for Decimal128
+
+## v0.4.6
 
 * Enhancements
   * Added `:connect_timout_ms` to `Mongo.start_link/1`

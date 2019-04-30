@@ -56,6 +56,8 @@ defmodule Mongo do
 
   @timeout 5000
 
+  @dialyzer [no_match: [count_documents!: 4]]
+
   @type conn :: DbConnection.Conn
   @type collection :: String.t
   @opaque cursor :: Mongo.Cursor.t | Mongo.AggregationCursor.t | Mongo.SinglyCursor.t
@@ -110,6 +112,8 @@ defmodule Mongo do
     * `:after_connect` - A function to run on connect use `run/3`. Either a
       1-arity fun, `{module, function, args}` with `DBConnection.t`, prepended
       to `args` or `nil` (default: `nil`)
+    * `:auth_mechanism` - options for the mongo authentication mechanism,
+      currently only supports `:x509` atom as a value
     * `:ssl` - Set to `true` if ssl should be used (default: `false`)
     * `:ssl_opts` - A list of ssl options, see the ssl docs
 
@@ -119,7 +123,7 @@ defmodule Mongo do
     * `:set_name_bad_topology` - A `:set_name` was given but the topology was
       set to something other than `:replica_set_no_primary` or `:single`
   """
-  @spec start_link(Keyword.t) :: {:ok, pid} | {:error, Mongo.Error.t | term}
+  @spec start_link(Keyword.t) :: {:ok, pid} | {:error, Mongo.Error.t | atom}
   def start_link(opts) do
     opts
     |> UrlParser.parse_url()
@@ -161,6 +165,7 @@ defmodule Mongo do
   ## Options
 
     * `:allow_disk_use` - Enables writing to temporary files (Default: false)
+    * `:collation` - Optionally specifies a collation to use in MongoDB 3.4 and
     * `:max_time` - Specifies a time limit in milliseconds
   """
   @spec aggregate(GenServer.server, collection, [BSON.document], Keyword.t) :: cursor
@@ -169,15 +174,23 @@ defmodule Mongo do
       aggregate: coll,
       pipeline: pipeline,
       allowDiskUse: opts[:allow_disk_use],
+      collation: opts[:collation],
       maxTimeMS: opts[:max_time]
     ] |> filter_nils
     wv_query = %Query{action: :wire_version}
 
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts) do
+    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
+    {:ok, version} <- DBConnection.execute(conn, wv_query, [], defaults(opts)) do
+      cursor? = version >= 1 and Keyword.get(opts, :use_cursor, true)
       opts = Keyword.drop(opts, ~w(allow_disk_use use_cursor)a)
 
-      query = query ++ [cursor: filter_nils(%{batchSize: opts[:batch_size]})]
-      aggregation_cursor(conn, "$cmd", query, nil, opts)
+      if cursor? do
+        query = query ++ [cursor: filter_nils(%{batchSize: opts[:batch_size]})]
+        aggregation_cursor(conn, "$cmd", query, nil, opts)
+      else
+        query = query ++ [cursor: %{}]
+        aggregation_cursor(conn, "$cmd", query, nil, opts)
+      end
     end
   end
 
@@ -196,10 +209,11 @@ defmodule Mongo do
       selects multiple documents.
     * `:upsert` -  Create a document if no document matches the query or updates
       the document.
+    * `:collation` - Optionally specifies a collation to use in MongoDB 3.4 and
   """
-  @spec find_one_and_update(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(BSON.document)
+  @spec find_one_and_update(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(BSON.document) | {:ok, nil}
   def find_one_and_update(topology_pid, coll, filter, update, opts \\ []) do
-    modifier_docs(update, :update)
+    _ = modifier_docs(update, :update)
     query = [
       findAndModify:            coll,
       query:                    filter,
@@ -213,9 +227,9 @@ defmodule Mongo do
       collation:                opts[:collation],
     ] |> filter_nils
 
-    opts = Keyword.drop(opts, ~w(bypass_document_validation max_time projection return_document sort upsert collation))
+    opts = Keyword.drop(opts, ~w(bypass_document_validation max_time projection return_document sort upsert collation)a)
 
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
+    with {:ok, conn, _, _} <- select_server(topology_pid, :write, opts),
          {:ok, doc} <- direct_command(conn, query, opts), do: {:ok, doc["value"]}
   end
 
@@ -239,7 +253,7 @@ defmodule Mongo do
   """
   @spec find_one_and_replace(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(BSON.document)
   def find_one_and_replace(topology_pid, coll, filter, replacement, opts \\ []) do
-    modifier_docs(replacement, :replace)
+    _ = modifier_docs(replacement, :replace)
     query = [
       findAndModify:            coll,
       query:                    filter,
@@ -253,9 +267,9 @@ defmodule Mongo do
       collation:                opts[:collation],
     ] |> filter_nils
 
-    opts = Keyword.drop(opts, ~w(bypass_document_validation max_time projection return_document sort upsert collation))
+    opts = Keyword.drop(opts, ~w(bypass_document_validation max_time projection return_document sort upsert collation)a)
 
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
+    with {:ok, conn, _, _} <- select_server(topology_pid, :write, opts),
          {:ok, doc} <- direct_command(conn, query, opts), do: {:ok, doc["value"]}
   end
 
@@ -284,21 +298,13 @@ defmodule Mongo do
       sort:          opts[:sort],
       collation:     opts[:collation],
     ] |> filter_nils
-    opts = Keyword.drop(opts, ~w(max_time projection sort collation))
+    opts = Keyword.drop(opts, ~w(max_time projection sort collation)a)
 
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
+    with {:ok, conn, _, _} <- select_server(topology_pid, :write, opts),
          {:ok, doc} <- direct_command(conn, query, opts), do: {:ok, doc["value"]}
   end
 
-  @doc """
-  Returns the count of documents that would match a `find/4` query.
-
-  ## Options
-
-    * `:limit` - Maximum number of documents to fetch with the cursor
-    * `:skip` - Number of documents to skip before returning the first
-    * `:hint` - Hint which index to use for the query
-  """
+  @doc false
   @spec count(GenServer.server, collection, BSON.document, Keyword.t) :: result(non_neg_integer)
   def count(topology_pid, coll, filter, opts \\ []) do
     query = [
@@ -306,23 +312,75 @@ defmodule Mongo do
       query: filter,
       limit: opts[:limit],
       skip: opts[:skip],
-      hint: opts[:hint]
+      hint: opts[:hint],
+      collation: opts[:collation]
     ] |> filter_nils
 
-    opts = Keyword.drop(opts, ~w(limit skip hint)a)
+    opts = Keyword.drop(opts, ~w(limit skip hint collation)a)
 
     # Mongo 2.4 and 2.6 returns a float
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
-         {:ok, doc} <- direct_command(conn, query, opts),
+    with {:ok, doc} <- command(topology_pid, query, opts),
          do: {:ok, trunc(doc["n"])}
   end
 
-  @doc """
-  Similar to `count/4` but unwraps the result and raises on error.
-  """
+  @doc false
   @spec count!(GenServer.server, collection, BSON.document, Keyword.t) :: result!(non_neg_integer)
   def count!(topology_pid, coll, filter, opts \\ []) do
     bangify(count(topology_pid, coll, filter, opts))
+  end
+
+  @doc """
+  Returns the count of documents that would match a find/4 query.
+
+  ## Options
+    * `:limit` - Maximum number of documents to fetch with the cursor
+    * `:skip` - Number of documents to skip before returning the first
+  """
+  @spec count_documents(GenServer.server, collection, BSON.document, Keyword.t) :: result(non_neg_integer)
+  def count_documents(topology_pid, coll, filter, opts \\ []) do
+    pipeline = [
+      {"$match", filter},
+      {"$skip", opts[:skip]},
+      {"$limit", opts[:limit]},
+      {"$group", %{"_id" => nil, "n" => %{"$sum" => 1}}}
+    ] |> filter_nils |> Enum.map(&List.wrap/1)
+
+    documents =
+      topology_pid
+      |> Mongo.aggregate(coll, pipeline, opts)
+      |> Enum.to_list
+
+    case documents do
+      [%{"n" => count}] -> {:ok, count}
+      [] -> {:error, :nothing_returned}
+      _ -> {:error, :too_many_documents_returned}
+    end
+  end
+
+  @doc """
+  Similar to `count_documents/4` but unwraps the result and raises on error.
+  """
+  @spec count_documents!(GenServer.server, collection, BSON.document, Keyword.t) :: result!(non_neg_integer)
+  def count_documents!(topology_pid, coll, filter, opts \\ []) do
+    bangify(count_documents(topology_pid, coll, filter, opts))
+  end
+
+  @doc """
+  Estimate the number of documents in a collection using collection metadata.
+  """
+  @spec estimated_document_count(GenServer.server, collection, Keyword.t) :: result(non_neg_integer)
+  def estimated_document_count(topology_pid, coll, opts) do
+    opts = Keyword.drop(opts, [:skip, :limit, :hint, :collation])
+    count(topology_pid, coll, %{}, opts)
+  end
+
+  @doc """
+  Similar to `estimated_document_count/3` but unwraps the result and raises on
+  error.
+  """
+  @spec estimated_document_count!(GenServer.server, collection, Keyword.t) :: result!(non_neg_integer)
+  def estimated_document_count!(topology_pid, coll, opts) do
+    bangify(estimated_document_count(topology_pid, coll, opts))
   end
 
   @doc """
@@ -331,6 +389,7 @@ defmodule Mongo do
   ## Options
 
     * `:max_time` - Specifies a time limit in milliseconds
+    * `:collation` - Optionally specifies a collation to use in MongoDB 3.4 and
   """
   @spec distinct(GenServer.server, collection, String.t | atom, BSON.document, Keyword.t) :: result([BSON.t])
   def distinct(topology_pid, coll, field, filter, opts \\ []) do
@@ -338,10 +397,11 @@ defmodule Mongo do
       distinct: coll,
       key: field,
       query: filter,
+      collation: opts[:collation],
       maxTimeMS: opts[:max_time]
     ] |> filter_nils
 
-    opts = Keyword.drop(opts, ~w(max_time))
+    opts = Keyword.drop(opts, ~w(max_time)a)
 
     with {:ok, conn, _, _} <- select_server(topology_pid, :read, opts),
          {:ok, doc} <- direct_command(conn, query, opts),
@@ -431,9 +491,10 @@ defmodule Mongo do
       |> Keyword.delete(:sort)
       |> Keyword.put(:limit, 1)
       |> Keyword.put(:batch_size, 1)
-    find(conn, coll, filter, opts)
-    |> Enum.to_list   # TODO: Can be changed to Enum.at(0) if Elixir 1.4.0+
-    |> List.first
+
+    conn
+    |> find(coll, filter, opts)
+    |> Enum.at(0)
   end
 
   @doc false
@@ -475,12 +536,13 @@ defmodule Mongo do
   def command(topology_pid, query, opts \\ []) do
     rp = ReadPreference.defaults(%{mode: :primary})
     rp_opts = [read_preference: Keyword.get(opts, :read_preference, rp)]
-    with {:ok, conn, _, _} <- select_server(topology_pid, :read, rp_opts),
+    with {:ok, conn, slave_ok, _} <- select_server(topology_pid, :read, rp_opts),
+         opts = Keyword.put(opts, :slave_ok, slave_ok),
          do: direct_command(conn, query, opts)
   end
 
   @doc false
-  @spec direct_command(pid, BSON.document, Keyword.t) :: result(BSON.document)
+  @spec direct_command(pid, BSON.document, Keyword.t) :: {:ok, BSON.document | nil} | {:error, Mongo.Error.t}
   def direct_command(conn, query, opts \\ []) do
     params = [query]
     query = %Query{action: :command}
@@ -555,12 +617,13 @@ defmodule Mongo do
 
     * `:continue_on_error` - even if insert fails for one of the documents
       continue inserting the remaining ones (default: `false`)
+    * `:ordered` - A boolean specifying whether the mongod instance should
+      perform an ordered or unordered insert. (default: `true`)
 
   ## Examples
 
       Mongo.insert_many(pid, "users", [%{first_name: "John", last_name: "Smith"}, %{first_name: "Jane", last_name: "Doe"}])
   """
-  # TODO describe the ordered option
   @spec insert_many(GenServer.server, collection, [BSON.document], Keyword.t) :: result(Mongo.InsertManyResult.t)
   def insert_many(topology_pid, coll, docs, opts \\ []) do
     assert_many_docs!(docs)
@@ -642,7 +705,7 @@ defmodule Mongo do
   """
   @spec replace_one(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(Mongo.UpdateResult.t)
   def replace_one(topology_pid, coll, filter, replacement, opts \\ []) do
-    modifier_docs(replacement, :replace)
+    _ = modifier_docs(replacement, :replace)
 
     params = [filter, replacement]
     query = %Query{action: :replace_one, extra: coll}
@@ -688,7 +751,7 @@ defmodule Mongo do
   """
   @spec update_one(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(Mongo.UpdateResult.t)
   def update_one(topology_pid, coll, filter, update, opts \\ []) do
-    modifier_docs(update, :update)
+    _ = modifier_docs(update, :update)
 
     params = [filter, update]
     query = %Query{action: :update_one, extra: coll}
@@ -727,7 +790,7 @@ defmodule Mongo do
   """
   @spec update_many(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result(Mongo.UpdateResult.t)
   def update_many(topology_pid, coll, filter, update, opts \\ []) do
-    modifier_docs(update, :update)
+    _ = modifier_docs(update, :update)
 
     params = [filter, update]
     query = %Query{action: :update_many, extra: coll}
@@ -750,6 +813,45 @@ defmodule Mongo do
   @spec update_many!(GenServer.server, collection, BSON.document, BSON.document, Keyword.t) :: result!(Mongo.UpdateResult.t)
   def update_many!(topology_pid, coll, filter, update, opts \\ []) do
     bangify(update_many(topology_pid, coll, filter, update, opts))
+  end
+
+  @doc """
+  Returns a cursor to enumerate all indexes
+  """
+  @spec list_indexes(GenServer.server, String.t, Keyword.t) :: cursor
+  def list_indexes(topology_pid, coll, opts \\ []) do
+    with {:ok, conn, _, _} <- Mongo.select_server(topology_pid, :read, opts) do
+      aggregation_cursor(conn, "$cmd", [listIndexes: coll], nil, opts)
+    end
+  end
+
+  @doc """
+  Convenient function that returns a cursor with the names of the indexes.
+  """
+  @spec list_index_names(GenServer.server, String.t, Keyword.t) :: %Stream{}
+  def list_index_names(topology_pid, coll, opts \\ []) do
+    list_indexes(topology_pid, coll, opts)
+    |> Stream.map(fn %{"name" => name } -> name end)
+  end
+
+
+  @doc """
+  Getting Collection Names
+  """
+  @spec show_collections(GenServer.server, Keyword.t) :: cursor
+  def show_collections(topology_pid, opts \\ []) do
+
+    ##
+    # from the specs
+    # https://github.com/mongodb/specifications/blob/f4bb783627e7ed5c4095c5554d35287956ef8970/source/enumerate-collections.rst#post-mongodb-280-rc3-versions
+    #
+    # In versions 2.8.0-rc3 and later, the listCollections command returns a cursor!
+    #
+    with {:ok, conn, _, _} <- Mongo.select_server(topology_pid, :read, opts) do
+      aggregation_cursor(conn, "$cmd", [listCollections: 1], nil, opts)
+      |> Stream.filter(fn coll -> coll["type"] == "collection" end)
+      |> Stream.map(fn coll -> coll["name"] end)
+    end
   end
 
   @doc false
@@ -926,25 +1028,15 @@ defmodule Mongo do
     {:error, Mongo.Error.exception(message: message, code: code)}
   end
 
-  defp assign_ids(doc) when is_map(doc) do
-    [assign_id(doc)]
-    |> Enum.unzip
-  end
-
-  defp assign_ids([{_, _} | _] = doc) do
-    [assign_id(doc)]
-    |> Enum.unzip
-  end
-
   defp assign_ids(list) when is_list(list) do
     Enum.map(list, &assign_id/1)
     |> Enum.unzip
   end
+
   defp assign_id(%{_id: id} = map) when id != nil,
     do: {id, map}
   defp assign_id(%{"_id" => id} = map) when id != nil,
     do: {id, map}
-
   defp assign_id([{_, _} | _] = keyword) do
     case Keyword.take(keyword, [:_id, "_id"]) do
       [{_key, id} | _] when id != nil ->

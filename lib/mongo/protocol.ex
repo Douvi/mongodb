@@ -33,6 +33,7 @@ defmodule Mongo.Protocol do
       database: Keyword.fetch!(opts, :database),
       write_concern: Map.new(write_concern),
       wire_version: nil,
+      auth_mechanism: opts[:auth_mechanism] || nil,
       connection_type: Keyword.fetch!(opts, :connection_type),
       topology_pid: Keyword.fetch!(opts, :topology_pid),
       ssl: opts[:ssl] || false
@@ -57,11 +58,14 @@ defmodule Mongo.Protocol do
     case result do
       {:ok, s} ->
         {:ok, s}
-      {:disconnect, {:tcp_recv, reason}, _s} ->
-        {:error, Mongo.Error.exception(tag: :tcp, action: "recv", reason: reason)}
-      {:disconnect, {:tcp_send, reason}, _s} ->
-        {:error, Mongo.Error.exception(tag: :tcp, action: "send", reason: reason)}
-      {:disconnect, %Mongo.Error{} = reason, _s} ->
+      {:disconnect, reason, s} ->
+        reason = case reason do
+          {:tcp_recv, reason} -> Mongo.Error.exception(tag: :tcp, action: "recv", reason: reason, host: s.host)
+          {:tcp_send, reason} -> Mongo.Error.exception(tag: :tcp, action: "send", reason: reason, host: s.host)
+          %Mongo.Error{} = reason -> reason
+        end
+        {mod, sock} = s.socket
+        mod.close(sock)
         {:error, reason}
       {:error, reason} ->
         {:error, reason}
@@ -90,7 +94,8 @@ defmodule Mongo.Protocol do
       {:ok, ssl_sock} ->
         {:ok, %{s | socket: {:ssl, ssl_sock}}}
       {:error, reason} ->
-        {:error, Mongo.Error.exception(tag: :ssl, action: "connect", reason: reason)}
+        :gen_tcp.close(sock)
+        {:error, Mongo.Error.exception(tag: :ssl, action: "connect", reason: reason, host: s.host)}
     end
   end
 
@@ -114,7 +119,7 @@ defmodule Mongo.Protocol do
         {:ok, %{s | socket: {:gen_tcp, socket}}}
 
       {:error, reason} ->
-        {:error, Mongo.Error.exception(tag: :tcp, action: "connect", reason: reason)}
+        {:error, Mongo.Error.exception(tag: :tcp, action: "connect", reason: reason, host: s.host)}
     end
   end
 
@@ -140,24 +145,24 @@ defmodule Mongo.Protocol do
   end
 
   def handle_info({:tcp_closed, _}, s) do
-    err = Mongo.Error.exception(tag: :tcp, action: "async recv", reason: :closed)
+    err = Mongo.Error.exception(tag: :tcp, action: "async recv", reason: :closed, host: s.host)
     {:disconnect, err, s}
   end
 
   def handle_info({:tcp_error, _, reason}, s) do
-    err = Mongo.Error.exception(tag: :tcp, action: "async recv", reason: reason)
+    err = Mongo.Error.exception(tag: :tcp, action: "async recv", reason: reason, host: s.host)
     {:disconnect, err, s}
   end
 
   def handle_info({:ssl_closed, _}, s) do
-    err = Mongo.Error.exception(tag: :ssl, action: "async recv", reason: :closed)
+    err = Mongo.Error.exception(tag: :ssl, action: "async recv", reason: :closed, host: s.host)
     {:disconnect, err, s}
   end
 
   def checkout(%{socket: {mod, sock}} = s) do
     case setopts(mod, sock, [active: :false]) do
       :ok                       -> recv_buffer(s)
-      {:disconnect, _, _} = dis -> dis
+      {:error, _} =             err -> err
     end
   end
 
@@ -167,7 +172,6 @@ defmodule Mongo.Protocol do
         {:ok, s}
     after
       0 ->
-        :inet.setopts(sock, buffer: <<>>)
         {:ok, s}
     end
   end
@@ -177,7 +181,6 @@ defmodule Mongo.Protocol do
         {:ok, s}
     after
       0 ->
-        :ssl.setopts(sock, buffer: <<>>)
         {:ok, s}
     end
   end

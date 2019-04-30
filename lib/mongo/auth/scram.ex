@@ -12,7 +12,6 @@ defmodule Mongo.Auth.SCRAM do
     payload    = first_message(first_bare)
     message    = [saslStart: 1, mechanism: "SCRAM-SHA-1", payload: payload]
 
-    # TODO: with/else in elixir 1.3
     result =
       with {:ok, %{"ok" => ok} = reply} when ok == 1 <- command(-2, message, s),
            {message, signature} = first(reply, first_bare, username, password, nonce),
@@ -26,7 +25,7 @@ defmodule Mongo.Auth.SCRAM do
         :ok
       {:ok, %{"ok" => z, "errmsg" => reason, "code" => code}} when z == 0 ->
         {:error, Mongo.Error.exception(message: "auth failed for user #{username}: #{reason}", code: code)}
-      {:error, _} = error ->
+      error ->
         error
     end
   end

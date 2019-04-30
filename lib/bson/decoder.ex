@@ -1,6 +1,7 @@
 defmodule BSON.Decoder do
   @moduledoc false
   use BSON.Utils
+  alias BSON.Decimal128
 
   def decode(binary) do
     {map, ""} = document(binary)
@@ -68,7 +69,7 @@ defmodule BSON.Decoder do
   end
 
   defp type(@type_datetime, <<unix_ms::int64, rest::binary>>) do
-    {DateTime.from_unix!(unix_ms, :milliseconds), rest}
+    {DateTime.from_unix!(unix_ms, :millisecond), rest}
   end
 
   defp type(@type_undefined, rest) do
@@ -112,6 +113,10 @@ defmodule BSON.Decoder do
 
   defp type(@type_int64, <<int::int64, rest::binary>>) do
     {int, rest}
+  end
+
+  defp type(@type_decimal128, <<bits::binary-size(16), rest::binary>>) do
+    {Decimal128.decode(bits), rest}
   end
 
   defp type(@type_min, rest) do

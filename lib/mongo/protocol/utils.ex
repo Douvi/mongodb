@@ -16,7 +16,13 @@ defmodule Mongo.Protocol.Utils do
 
   def command(id, command, s),  do: command(id, command, s, s.timeout)
   def command(id, command, s, timeout) do
-    op = op_query(coll: namespace("$cmd", s, nil), query: BSON.Encoder.document(command),
+    ns =
+      if Keyword.get(command, :mechanism) == "MONGODB-X509" && Keyword.get(command, :authenticate) == 1 do
+        namespace("$cmd", nil, "$external")
+      else
+        namespace("$cmd", s, nil)
+    end
+    op = op_query(coll: ns, query: BSON.Encoder.document(command),
                   select: "", num_skip: 0, num_return: 1, flags: [])
     case message(id, op, s, timeout) do
       {:ok, op_reply(docs: docs)} ->
@@ -122,49 +128,5 @@ defmodule Mongo.Protocol.Utils do
   def digest_password(username, password) do
     :crypto.hash(:md5, [username, ":mongo:", password])
     |> Base.encode16(case: :lower)
-  end
-
-  def assign_ids(doc) when is_map(doc),
-    do: [assign_id(doc)] |> unzip
-  def assign_ids([{_, _} | _] = doc),
-    do: [assign_id(doc)] |> unzip
-  def assign_ids(list) when is_list(list),
-    do: Enum.map(list, &assign_id/1) |> unzip
-
-  defp assign_id(%{_id: id} = map) when id != nil,
-    do: {id, map}
-  defp assign_id(%{"_id" => id} = map) when id != nil,
-    do: {id, map}
-  defp assign_id([{_, _} | _] = keyword) do
-    case Keyword.take(keyword, [:_id, "_id"]) do
-      [{_key, id} | _] when id != nil ->
-        {id, keyword}
-      [] ->
-        add_id(keyword)
-    end
-  end
-  defp assign_id(map) when is_map(map) do
-    map |> Map.to_list |> add_id
-  end
-
-  defp add_id(doc) do
-    id = Mongo.IdServer.new
-    {id, add_id(doc, id)}
-  end
-  defp add_id([{key, _}|_] = list, id) when is_atom(key),
-    do: [{:_id, id}|list]
-  defp add_id([{key, _}|_] = list, id) when is_binary(key),
-    do: [{"_id", id}|list]
-  defp add_id([], id),
-    do: [{"_id", id}] # Why are you inserting empty documents =(
-
-  # TODO: Enum.unzip ?
-  defp unzip(list) do
-    {xs, ys} =
-      Enum.reduce(list, {[], []}, fn {x, y}, {xs, ys} ->
-        {[x|xs], [y|ys]}
-      end)
-
-    {Enum.reverse(xs), Enum.reverse(ys)}
   end
 end
